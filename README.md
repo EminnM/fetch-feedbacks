@@ -1,3 +1,3 @@
 to run the app
 
-streamlit run fetch_filter.py
+streamlit run fetch_and_filter.py
