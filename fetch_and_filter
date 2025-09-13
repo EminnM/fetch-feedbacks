@@ -1,0 +1,130 @@
+# streamlit_reddit_tool.py
+import streamlit as st
+import praw
+import pandas as pd
+import plotly.express as px
+from sentence_transformers import SentenceTransformer
+from sklearn.decomposition import PCA
+from sklearn.metrics.pairwise import cosine_similarity
+import numpy as np
+
+st.set_page_config(page_title="Reddit Keyword Explorer", layout="wide")
+st.title("🔎 Reddit Keyword Explorer with Embedding Filtering")
+
+# --- Streamlit Inputs ---
+keyword_input = st.text_input("Enter keyword to search Reddit:")
+explanation_input = st.text_area("Optional: Provide a short explanation about this keyword:")
+num_posts = st.slider("Number of posts to fetch:", 5, 50, 15)
+
+# --- Reddit API Setup ---
+REDDIT_CLIENT_ID = ""
+REDDIT_CLIENT_SECRET = ""
+REDDIT_USER_AGENT = ""
+
+reddit = praw.Reddit(
+    client_id=REDDIT_CLIENT_ID,
+    client_secret=REDDIT_CLIENT_SECRET,
+    user_agent=REDDIT_USER_AGENT
+)
+
+# --- Load Embedding Model ---
+@st.cache_resource
+def load_model():
+    return SentenceTransformer("all-MiniLM-L6-v2")
+
+model = load_model()
+
+if keyword_input:
+    st.info(f"Fetching posts/comments for keyword: {keyword_input} ...")
+    
+    # --- Fetch Reddit posts ---
+    feedback_data = []
+    for submission in reddit.subreddit("all").search(keyword_input, limit=num_posts):
+        submission.comments.replace_more(limit=0)
+        comments = [c.body for c in submission.comments[:5]]
+        feedback_data.append({
+            "subreddit": submission.subreddit.display_name,
+            "title": submission.title,
+            "selftext": submission.selftext,
+            "comments": comments,
+            "url": submission.url
+        })
+
+    
+    if len(feedback_data) == 0:
+        st.warning("No posts found for this keyword.")
+    else:
+        st.success(f"Fetched {len(feedback_data)} posts!")
+
+        # --- Build combined text for embedding ---
+        combined_texts = [
+            f"Subreddit: {fb['subreddit']} | Title: {fb['title']} | Post: {fb['selftext']} | Comments: {' '.join(fb['comments'])}"
+            for fb in feedback_data
+        ]
+
+
+        # --- Embed posts and explanation ---
+        # --- Embed posts and explanation ---
+    embeddings = model.encode(combined_texts, convert_to_numpy=True)
+    if explanation_input.strip():
+        explanation_embedding = model.encode([explanation_input], convert_to_numpy=True)
+        # Compute cosine similarity to filter posts
+        similarities = cosine_similarity(embeddings, explanation_embedding).flatten()
+        threshold = st.slider("Similarity threshold", 0.0, 1.0, 0.2)
+
+        filtered_idx = np.where(similarities >= threshold)[0]
+        eliminated_idx = np.where(similarities < threshold)[0]  # Indexes of eliminated posts
+
+        # Keep only filtered posts
+        embeddings = embeddings[filtered_idx]
+        feedback_data = [feedback_data[i] for i in filtered_idx]
+
+        st.info(f"{len(filtered_idx)} posts match the explanation similarity threshold.")
+        st.warning(f"{len(eliminated_idx)} posts were eliminated based on explanation similarity.")
+
+        # --- Build DataFrame for eliminated posts ---
+        eliminated_data = []
+        for i in eliminated_idx:
+            fb = feedback_data[i] if i < len(feedback_data) else combined_texts[i]
+            eliminated_data.append({
+                "title": feedback_data[i]["title"] if i < len(feedback_data) else "",
+                "url": feedback_data[i]["url"] if i < len(feedback_data) else "",
+                "comments": "\n".join(feedback_data[i]["comments"]) if i < len(feedback_data) else combined_texts[i]
+            })
+        df_eliminated = pd.DataFrame(eliminated_data)
+
+        with st.expander("❌ Show Eliminated Posts"):
+            st.dataframe(df_eliminated)
+
+
+        # --- Dimensionality reduction ---
+        pca = PCA(n_components=3, random_state=42)
+        embedding_3d = pca.fit_transform(embeddings)
+
+        # --- Build DataFrame for Plotly ---
+        data = []
+        for i, fb in enumerate(feedback_data):
+            data.append({
+                "x": embedding_3d[i, 0],
+                "y": embedding_3d[i, 1],
+                "z": embedding_3d[i, 2],
+                "title": fb["title"],
+                "comments": "\n".join(fb["comments"]),
+                "url": fb["url"]
+            })
+        df = pd.DataFrame(data)
+
+        # # --- 3D Scatter Plot ---
+        # fig = px.scatter_3d(
+        #     df,
+        #     x="x", y="y", z="z",
+        #     hover_data=["title", "comments", "url"],
+        #     opacity=0.7
+        # )
+        # fig.update_traces(marker=dict(size=6))
+        # fig.update_layout(height=800, margin=dict(l=0, r=0, t=50, b=0))
+        # st.plotly_chart(fig, use_container_width=True)
+
+        # --- Data Table ---
+        with st.expander("🔎 Show Data Table"):
+            st.dataframe(df[["title", "url", "comments"]])
